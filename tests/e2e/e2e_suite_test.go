@@ -174,6 +174,9 @@ func setupBootstrapCluster(ctx context.Context, config *clusterctl.E2EConfig, us
 			Name:               config.ManagementClusterName,
 			RequiresDockerSock: config.HasDockerProvider(),
 			Images:             config.Images,
+			// K3k sets a blockOwnerDeletion owner reference to its Cluster on the server PVC template,
+			// which the StatefulSet controller is not allowed to set when this admission plugin is enabled.
+			DisableOwnerReferencesPermissionEnforcement: true,
 		})
 		Expect(clusterProvider).NotTo(BeNil(), "Failed to create a bootstrap cluster")
 
