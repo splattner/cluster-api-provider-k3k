@@ -1,5 +1,13 @@
 # HCP cluster: the K3k control plane runs in the management cluster, the worker nodes are
 # CAPD (Docker) Machines bootstrapped by the k3s bootstrap provider (KThreesConfig).
+# See docs/hcp-mode.md. Requires the docker infrastructure provider and the k3s bootstrap provider.
+#
+# Variables:
+#   HCP_ENDPOINT_HOST   address of a management cluster node, reachable by the Docker Machines
+#   HCP_ENDPOINT_PORT   NodePort exposing the K3k server (default 30443)
+#   KUBERNETES_VERSION  Kubernetes version, without the K3s suffix (e.g. v1.35.0)
+#   KIND_IMAGE_VERSION  kindest/node image of the Docker Machines (default v1.35.0)
+#
 # The control plane endpoint is set upfront, so CAPD can't override it with its own load balancer.
 apiVersion: cluster.x-k8s.io/v1beta2
 kind: Cluster
@@ -9,7 +17,7 @@ metadata:
 spec:
   controlPlaneEndpoint:
     host: ${HCP_ENDPOINT_HOST}
-    port: ${HCP_ENDPOINT_PORT}
+    port: ${HCP_ENDPOINT_PORT:=30443}
   controlPlaneRef:
     apiGroup: controlplane.cluster.x-k8s.io
     kind: K3kControlPlane
@@ -37,7 +45,7 @@ spec:
   version: ${KUBERNETES_VERSION}-k3s1
   expose:
     nodePort:
-      serverPort: ${HCP_ENDPOINT_PORT}
+      serverPort: ${HCP_ENDPOINT_PORT:=30443}
 ---
 apiVersion: cluster.x-k8s.io/v1beta2
 kind: MachineDeployment
@@ -75,7 +83,7 @@ metadata:
 spec:
   template:
     spec:
-      customImage: kindest/node:${KIND_IMAGE_VERSION}
+      customImage: kindest/node:${KIND_IMAGE_VERSION:=v1.35.0}
 ---
 apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
 kind: KThreesConfigTemplate

@@ -76,7 +76,7 @@ providers:
     files:
     - sourcePath: "../../metadata.yaml"
     - sourcePath: "../../templates/cluster-template.yaml"
-    - sourcePath: "data/infrastructure-k3k/cluster-template-hcp-docker.yaml"
+    - sourcePath: "../../templates/cluster-template-hcp-docker.yaml"
 
 variables:
   INFRASTRUCTURE_PROVIDER: "k3k"
