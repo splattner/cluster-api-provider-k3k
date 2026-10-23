@@ -31,6 +31,22 @@ const (
 
 	// K3kControlPlaneAvailableReason surfaces when the backing K3k cluster is ready.
 	K3kControlPlaneAvailableReason = clusterv1beta2.AvailableReason
+
+	// K3kControllerUpToDateCondition is true when the K3k controller on the host cluster has at least the
+	// version required by the provider.
+	K3kControllerUpToDateCondition = "K3kControllerUpToDate"
+
+	// K3kControllerUpToDateReason surfaces when the K3k controller has at least the required version,
+	// possibly after being installed or upgraded by the provider.
+	K3kControllerUpToDateReason = "UpToDate"
+
+	// K3kControllerOutdatedReason surfaces when the K3k controller is older than the required version,
+	// and it was not installed by the provider, so it's not upgraded.
+	K3kControllerOutdatedReason = "Outdated"
+
+	// K3kControllerNotManagedReason surfaces when the K3k controller was not installed with the K3k Helm release,
+	// so its version can't be checked.
+	K3kControllerNotManagedReason = "NotManaged"
 )
 
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.

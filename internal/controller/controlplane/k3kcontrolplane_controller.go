@@ -69,6 +69,8 @@ type scope struct {
 
 	k3kControlPlane *controlplanev1.K3kControlPlane
 	cluster         *clusterv1beta2.Cluster
+	// hostConfig is the config of the host cluster, nil for the management cluster
+	hostConfig *rest.Config
 }
 
 // K3kControlPlaneReconciler reconciles a K3kControlPlane object
@@ -194,10 +196,6 @@ func (r *K3kControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		r.Host = hostClient
 	}
 
-	if _, err := r.ensureK3kController(ctx, hostConfig); err != nil {
-		return ctrl.Result{}, fmt.Errorf("error installing K3k controller: %w", err)
-	}
-
 	cluster, err := capiutil.GetOwnerCluster(ctx, r, k3kControlPlane.ObjectMeta)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("unable to get capi cluster owner: %w", err)
@@ -223,6 +221,7 @@ func (r *K3kControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if err := patchHelper.Patch(ctx, &k3kControlPlane, patch.WithOwnedConditions{Conditions: []string{
 			clusterv1beta2.PausedCondition,
 			controlplanev1.K3kControlPlaneAvailableCondition,
+			controlplanev1.K3kControllerUpToDateCondition,
 		}}); err != nil {
 			reterr = errors.Join(reterr, err)
 		}
@@ -232,6 +231,7 @@ func (r *K3kControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		Logger:          log,
 		k3kControlPlane: &k3kControlPlane,
 		cluster:         cluster,
+		hostConfig:      hostConfig,
 	}
 
 	if !k3kControlPlane.DeletionTimestamp.IsZero() {
@@ -246,6 +246,13 @@ func (r *K3kControlPlaneReconciler) reconcileNormal(ctx context.Context, scope *
 	if controllerutil.AddFinalizer(scope.k3kControlPlane, finalizer) {
 		return ctrl.Result{}, nil
 	}
+
+	plan, err := r.ensureK3kController(ctx, scope.hostConfig)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("error installing K3k controller: %w", err)
+	}
+
+	setK3kControllerUpToDateCondition(scope.k3kControlPlane, plan)
 
 	upstreamCluster, err := r.reconcileUpstreamCluster(ctx, scope.k3kControlPlane)
 	if err != nil {

@@ -7,12 +7,15 @@ import (
 	"github.com/Masterminds/semver/v3"
 	"helm.sh/helm/v3/pkg/release"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/cluster-api/util/conditions"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1 "k8s.io/api/core/v1"
 	apiError "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	controlplanev1 "github.com/rancher/cluster-api-provider-k3k/api/controlplane/v1beta1"
 	"github.com/rancher/cluster-api-provider-k3k/internal/helm"
 )
 
@@ -21,9 +24,9 @@ const (
 	k3kManagedByLabel = "k3k.cluster.x-k8s.io/managed-by"
 	k3kManagedByValue = "cluster-api-provider-k3k"
 
-	k3kControllerUpToDate   = "UpToDate"
-	k3kControllerOutdated   = "Outdated"
-	k3kControllerNotManaged = "NotManaged"
+	k3kControllerUpToDate   = controlplanev1.K3kControllerUpToDateReason
+	k3kControllerOutdated   = controlplanev1.K3kControllerOutdatedReason
+	k3kControllerNotManaged = controlplanev1.K3kControllerNotManagedReason
 )
 
 // k3kControllerPlan describes how to reconcile the K3k controller on the host cluster,
@@ -164,4 +167,23 @@ func (r *K3kControlPlaneReconciler) ensureK3kController(ctx context.Context, hos
 	}
 
 	return plan, nil
+}
+
+// setK3kControllerUpToDateCondition reports the state of the K3k controller on the host cluster.
+func setK3kControllerUpToDateCondition(controlPlane *controlplanev1.K3kControlPlane, plan k3kControllerPlan) {
+	status := metav1.ConditionTrue
+
+	switch plan.reason {
+	case k3kControllerOutdated:
+		status = metav1.ConditionFalse
+	case k3kControllerNotManaged:
+		status = metav1.ConditionUnknown
+	}
+
+	conditions.Set(controlPlane, metav1.Condition{
+		Type:    controlplanev1.K3kControllerUpToDateCondition,
+		Status:  status,
+		Reason:  plan.reason,
+		Message: plan.message,
+	})
 }

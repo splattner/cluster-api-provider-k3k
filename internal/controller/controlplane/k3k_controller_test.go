@@ -5,6 +5,11 @@ import (
 
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/release"
+	"sigs.k8s.io/cluster-api/util/conditions"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	controlplanev1 "github.com/rancher/cluster-api-provider-k3k/api/controlplane/v1beta1"
 
 	. "github.com/onsi/gomega"
 )
@@ -100,4 +105,30 @@ func TestPlanK3kControllerInvalidVersion(t *testing.T) {
 
 	_, err := planK3kController(rel, true, "1.2.0")
 	g.Expect(err).To(HaveOccurred())
+}
+
+func TestSetK3kControllerUpToDateCondition(t *testing.T) {
+	tests := []struct {
+		reason         string
+		expectedStatus metav1.ConditionStatus
+	}{
+		{reason: k3kControllerUpToDate, expectedStatus: metav1.ConditionTrue},
+		{reason: k3kControllerOutdated, expectedStatus: metav1.ConditionFalse},
+		{reason: k3kControllerNotManaged, expectedStatus: metav1.ConditionUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.reason, func(t *testing.T) {
+			g := NewWithT(t)
+
+			controlPlane := &controlplanev1.K3kControlPlane{}
+			setK3kControllerUpToDateCondition(controlPlane, k3kControllerPlan{reason: tt.reason, message: "message"})
+
+			condition := conditions.Get(controlPlane, controlplanev1.K3kControllerUpToDateCondition)
+			g.Expect(condition).ToNot(BeNil())
+			g.Expect(condition.Status).To(Equal(tt.expectedStatus))
+			g.Expect(condition.Reason).To(Equal(tt.reason))
+			g.Expect(condition.Message).To(Equal("message"))
+		})
+	}
 }
