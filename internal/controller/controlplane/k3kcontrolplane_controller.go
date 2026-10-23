@@ -30,6 +30,7 @@ import (
 	"github.com/rancher/k3k/pkg/controller/kubeconfig"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -136,6 +137,9 @@ func (r *K3kControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	r.Host = r.Client
 
+	// the host cluster config, nil for the management cluster
+	var hostConfig *rest.Config
+
 	if k3kControlPlane.Spec.HostKubeconfig != nil {
 		log.Info("targeting external host cluster")
 
@@ -155,6 +159,8 @@ func (r *K3kControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			return ctrl.Result{}, fmt.Errorf("failed to create RESTConfig from host kubeconfig secret: %w", err)
 		}
 
+		hostConfig = config
+
 		hostClient, err := client.New(config, client.Options{Scheme: r.Scheme()})
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to create host client: %w", err)
@@ -163,7 +169,7 @@ func (r *K3kControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		r.Host = hostClient
 	}
 
-	if err := r.ensureK3kController(ctx); err != nil {
+	if _, err := r.ensureK3kController(ctx, hostConfig); err != nil {
 		return ctrl.Result{}, fmt.Errorf("error installing K3k controller: %w", err)
 	}
 
@@ -260,30 +266,6 @@ func (r *K3kControlPlaneReconciler) reconcileDelete(ctx context.Context, scope *
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
-}
-
-// ensureK3kController
-func (r *K3kControlPlaneReconciler) ensureK3kController(ctx context.Context) error {
-	log := ctrl.LoggerFrom(ctx)
-
-	var k3kNamespace v1.Namespace
-	if err := r.Host.Get(ctx, client.ObjectKey{Name: "k3k-system"}, &k3kNamespace); err != nil {
-		if !apiError.IsNotFound(err) {
-			return fmt.Errorf("unable to get k3k-system namespace: %w", err)
-		}
-
-		log.Error(err, "k3k-system namespace not found: try to install K3k")
-
-		if err := r.Helm.InstallChart(ctx, nil); err != nil {
-			return fmt.Errorf("failed to install a K3k release: %w", err)
-		}
-
-		log.Info("k3k controller installed successfully")
-	}
-
-	log.V(1).Info("k3k-system namespace found, k3k controller should be available")
-
-	return nil
 }
 
 // reconcileUpstreamCluster creates/updates the k3k cluster that the k3k controllers will recognize.

@@ -8,6 +8,7 @@ import (
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -18,6 +19,8 @@ type SimpleRESTClientGetter struct {
 	RESTMapper      meta.RESTMapper
 }
 
+// NewRESTClientGetter returns a RESTClientGetter for the cluster of the rest.Config.
+// If restMapper is nil, a RESTMapper backed by the discovery of the cluster is used.
 func NewRESTClientGetter(restConfig *rest.Config, restMapper meta.RESTMapper) (*SimpleRESTClientGetter, error) {
 	k8s, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
@@ -25,6 +28,10 @@ func NewRESTClientGetter(restConfig *rest.Config, restMapper meta.RESTMapper) (*
 	}
 
 	cache := memory.NewMemCacheClient(k8s.Discovery())
+
+	if restMapper == nil {
+		restMapper = restmapper.NewDeferredDiscoveryRESTMapper(cache)
+	}
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, &clientcmd.ConfigOverrides{})
 
