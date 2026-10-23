@@ -10,10 +10,13 @@ import (
 
 	"github.com/go-logr/logr"
 	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/getter"
+	"helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/repo"
+	"helm.sh/helm/v3/pkg/storage/driver"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -28,6 +31,9 @@ const (
 	K3kRepoName = "k3k"
 	// K3kChartRef
 	K3kChartRef = "k3k/k3k"
+	// K3kChartVersion is the k3k chart version installed on the host cluster. It must match the
+	// github.com/rancher/k3k version in go.mod, so the controller understands the Cluster spec we create.
+	K3kChartVersion = "1.2.0"
 	// K3kReleaseName
 	K3kReleaseName = "k3k"
 )
@@ -110,35 +116,97 @@ func (c *Client) AddRepository(ctx context.Context, repoName, repoURL string) er
 	return nil
 }
 
-// InstallChart installs a Helm release from a repository chart.
-func (c *Client) InstallChart(ctx context.Context, values map[string]any) error {
-	logger := helmLogger(ctrl.LoggerFrom(ctx))
+// WithRESTClientGetter returns a copy of the Client running the Helm actions on the cluster of the RESTClientGetter.
+func (c *Client) WithRESTClientGetter(clientGetter genericclioptions.RESTClientGetter) *Client {
+	clientCopy := *c
+	clientCopy.restClientGetter = clientGetter
 
-	var cfg action.Configuration
-	if err := cfg.Init(c.restClientGetter, c.namespace, "", logger); err != nil {
+	return &clientCopy
+}
+
+// GetRelease returns the current Helm release, or nil if it doesn't exist.
+func (c *Client) GetRelease(ctx context.Context) (*release.Release, error) {
+	cfg, err := c.actionConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	rel, err := action.NewGet(cfg).Run(c.releaseName)
+	if errors.Is(err, driver.ErrReleaseNotFound) {
+		return nil, nil
+	}
+
+	return rel, err
+}
+
+// InstallChart installs a Helm release from a repository chart.
+func (c *Client) InstallChart(ctx context.Context, values map[string]any, labels map[string]string) error {
+	cfg, err := c.actionConfig(ctx)
+	if err != nil {
 		return err
 	}
 
-	install := action.NewInstall(&cfg)
+	install := action.NewInstall(cfg)
 	install.Namespace = c.namespace
 	install.CreateNamespace = true
 	install.ReleaseName = c.releaseName
+	install.Version = K3kChartVersion
+	install.Labels = labels
 	install.Wait = true
 	install.Timeout = time.Minute
 
-	chartPath, err := install.LocateChart(c.chartRef, c.settings)
-	if err != nil {
-		return fmt.Errorf("failed to locate chart %s: %w", c.chartRef, err)
-	}
-
-	chart, err := loader.Load(chartPath)
+	chart, err := c.loadChart(&install.ChartPathOptions)
 	if err != nil {
 		return err
 	}
 
-	_, err = install.Run(chart, values)
+	_, err = install.RunWithContext(ctx, chart, values)
 
 	return err
+}
+
+// UpgradeChart upgrades the Helm release to the chart version, reusing the values of the release.
+// The upgrade is rolled back if it fails.
+func (c *Client) UpgradeChart(ctx context.Context, labels map[string]string) error {
+	cfg, err := c.actionConfig(ctx)
+	if err != nil {
+		return err
+	}
+
+	upgrade := action.NewUpgrade(cfg)
+	upgrade.Namespace = c.namespace
+	upgrade.Version = K3kChartVersion
+	upgrade.Labels = labels
+	upgrade.ReuseValues = true
+	upgrade.Atomic = true
+	upgrade.Timeout = 2 * time.Minute
+
+	chart, err := c.loadChart(&upgrade.ChartPathOptions)
+	if err != nil {
+		return err
+	}
+
+	_, err = upgrade.RunWithContext(ctx, c.releaseName, chart, nil)
+
+	return err
+}
+
+func (c *Client) actionConfig(ctx context.Context) (*action.Configuration, error) {
+	var cfg action.Configuration
+	if err := cfg.Init(c.restClientGetter, c.namespace, "", helmLogger(ctrl.LoggerFrom(ctx))); err != nil {
+		return nil, err
+	}
+
+	return &cfg, nil
+}
+
+func (c *Client) loadChart(options *action.ChartPathOptions) (*chart.Chart, error) {
+	chartPath, err := options.LocateChart(c.chartRef, c.settings)
+	if err != nil {
+		return nil, fmt.Errorf("failed to locate chart %s: %w", c.chartRef, err)
+	}
+
+	return loader.Load(chartPath)
 }
 
 // helmLogger wraps a logger that will write messages using an expected pattern of a fmt string followed by arguments.

@@ -59,5 +59,5 @@ type K3kClusterList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&K3kCluster{}, &K3kClusterList{})
+	objectTypes = append(objectTypes, &K3kCluster{}, &K3kClusterList{})
 }
