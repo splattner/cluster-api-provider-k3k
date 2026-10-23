@@ -28,6 +28,9 @@ const (
 	K3kRepoName = "k3k"
 	// K3kChartRef
 	K3kChartRef = "k3k/k3k"
+	// K3kChartVersion is the k3k chart version installed on the host cluster. It must match the
+	// github.com/rancher/k3k version in go.mod, so the controller understands the Cluster spec we create.
+	K3kChartVersion = "1.2.0"
 	// K3kReleaseName
 	K3kReleaseName = "k3k"
 )
@@ -123,6 +126,7 @@ func (c *Client) InstallChart(ctx context.Context, values map[string]any) error 
 	install.Namespace = c.namespace
 	install.CreateNamespace = true
 	install.ReleaseName = c.releaseName
+	install.Version = K3kChartVersion
 	install.Wait = true
 	install.Timeout = time.Minute
 

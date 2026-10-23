@@ -60,5 +60,5 @@ type K3kControlPlaneTemplateList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&K3kControlPlaneTemplate{}, &K3kControlPlaneTemplateList{})
+	objectTypes = append(objectTypes, &K3kControlPlaneTemplate{}, &K3kControlPlaneTemplateList{})
 }
