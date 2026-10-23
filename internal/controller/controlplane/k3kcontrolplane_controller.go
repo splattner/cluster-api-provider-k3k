@@ -254,7 +254,9 @@ func (r *K3kControlPlaneReconciler) reconcileNormal(ctx context.Context, scope *
 
 	setK3kControllerUpToDateCondition(scope.k3kControlPlane, plan)
 
-	upstreamCluster, err := r.reconcileUpstreamCluster(ctx, scope.k3kControlPlane)
+	spec := desiredUpstreamSpec(scope.k3kControlPlane, scope.cluster)
+
+	upstreamCluster, err := r.reconcileUpstreamCluster(ctx, scope.k3kControlPlane, spec)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("unable to reconcile k3k cluster: %w", err)
 	}
@@ -268,7 +270,18 @@ func (r *K3kControlPlaneReconciler) reconcileNormal(ctx context.Context, scope *
 	scope.k3kControlPlane.Status.ClusterStatus = *upstreamCluster.Status.DeepCopy()
 	setAvailableCondition(scope.k3kControlPlane, upstreamCluster)
 
-	config, err := r.getKubeconfig(ctx, upstreamCluster)
+	if isHCP(scope.k3kControlPlane) {
+		if err := r.reconcileJoinToken(ctx, scope, upstreamCluster); err != nil {
+			if apiError.IsNotFound(err) {
+				scope.Info("Token for upstream cluster not ready yet", "clusterName", upstreamCluster.Name)
+				return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+			}
+
+			return ctrl.Result{}, fmt.Errorf("unable to reconcile join token: %w", err)
+		}
+	}
+
+	config, err := r.getKubeconfig(ctx, scope, upstreamCluster)
 	if err != nil {
 		if apiError.IsNotFound(err) {
 			scope.Info("Kubeconfig for upstream cluster not ready yet", "clusterName", upstreamCluster.Name)
@@ -278,11 +291,6 @@ func (r *K3kControlPlaneReconciler) reconcileNormal(ctx context.Context, scope *
 		scope.Error(err, "failure getting kubeconfig for cluster", "clusterName", upstreamCluster.Name)
 
 		return ctrl.Result{}, fmt.Errorf("unable to get kubeconfig secret: %w", err)
-	}
-
-	if err := r.createKubeconfigSecret(ctx, config, scope.k3kControlPlane); err != nil {
-		scope.Error(err, "Unable to store kubeconfig as a secret")
-		return ctrl.Result{}, fmt.Errorf("unable to store kubeconfig secret")
 	}
 
 	serverURL, err := serverURLFromKubeConfig(config)
@@ -295,6 +303,24 @@ func (r *K3kControlPlaneReconciler) reconcileNormal(ctx context.Context, scope *
 	if err != nil {
 		scope.Error(err, "Unable to get the control plane endpoint from serverURL")
 		return ctrl.Result{}, fmt.Errorf("unable to resolve control plane endpoint: %w", err)
+	}
+
+	// Worker nodes join through the Cluster endpoint: don't initialize the control plane if K3k is not exposed there.
+	if clusterEndpoint := scope.cluster.Spec.ControlPlaneEndpoint; isHCP(scope.k3kControlPlane) && clusterEndpoint.IsValid() && clusterEndpoint != endpoint {
+		conditions.Set(scope.k3kControlPlane, metav1.Condition{
+			Type:   controlplanev1.K3kControlPlaneAvailableCondition,
+			Status: metav1.ConditionFalse,
+			Reason: controlplanev1.K3kControlPlaneEndpointMismatchReason,
+			Message: fmt.Sprintf("K3k cluster is exposed at %s, but the Cluster control plane endpoint is %s: check the expose configuration (e.g. expose.nodePort.serverPort)",
+				endpoint.String(), clusterEndpoint.String()),
+		})
+
+		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+	}
+
+	if err := r.createKubeconfigSecret(ctx, config, scope.k3kControlPlane); err != nil {
+		scope.Error(err, "Unable to store kubeconfig as a secret")
+		return ctrl.Result{}, fmt.Errorf("unable to store kubeconfig secret")
 	}
 
 	// CAPI copies the endpoint to the Cluster and orchestrates Machine provisioning from these fields.
@@ -346,16 +372,13 @@ func setAvailableCondition(controlPlane *controlplanev1.K3kControlPlane, upstrea
 
 // reconcileUpstreamCluster creates/updates the k3k cluster that the k3k controllers will recognize.
 // It doesn't remove clusters if the controlPlane is being deleted.
-func (r *K3kControlPlaneReconciler) reconcileUpstreamCluster(ctx context.Context, controlPlane *controlplanev1.K3kControlPlane) (*upstream.Cluster, error) {
+func (r *K3kControlPlaneReconciler) reconcileUpstreamCluster(ctx context.Context, controlPlane *controlplanev1.K3kControlPlane, spec upstream.ClusterSpec) (*upstream.Cluster, error) {
 	log := ctrl.LoggerFrom(ctx)
 
 	clusters, err := r.getUpstreamClusters(ctx, controlPlane)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current clusters for controlPlane %s/%s: %w", controlPlane.Namespace, controlPlane.Name, err)
 	}
-
-	// Use the embedded upstream ClusterSpec directly
-	spec := controlPlane.Spec.ClusterSpec
 
 	if len(clusters) > 1 {
 		var names []string
@@ -457,10 +480,16 @@ func (r *K3kControlPlaneReconciler) getUpstreamClusters(ctx context.Context, con
 }
 
 // getKubeconfig retrieves the kubeconfig for the given upstream K3k cluster.
-func (r *K3kControlPlaneReconciler) getKubeconfig(ctx context.Context, upstreamCluster *upstream.Cluster) (*clientcmdapi.Config, error) {
+func (r *K3kControlPlaneReconciler) getKubeconfig(ctx context.Context, scope *scope, upstreamCluster *upstream.Cluster) (*clientcmdapi.Config, error) {
 	// TODO: We set the expiry to one year here, but we need to continually keep this up to date
 	cfg := kubeconfig.New()
 	cfg.ExpiryDate = time.Hour * 24 * 365
+
+	if isHCP(scope.k3kControlPlane) {
+		if host := hcpServerHost(scope.k3kControlPlane, scope.cluster); host != "" {
+			return cfg.Generate(ctx, r.Host, upstreamCluster, host)
+		}
+	}
 
 	restConfig, err := ctrl.GetConfig()
 	if err != nil {

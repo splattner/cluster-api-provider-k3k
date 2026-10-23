@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/gob"
 	"flag"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +24,9 @@ import (
 	"sigs.k8s.io/cluster-api/util/conditions"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	clusterv1beta2 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -84,6 +89,9 @@ func beforeAllParallelNodes() []byte {
 	By("Initializing the bootstrap cluster")
 	initBootstrapCluster(ctx, bootstrapClusterProxy, e2eConfig, clusterctlConfigPath)
 
+	By("Installing the k3s bootstrap provider")
+	installK3sBootstrapProvider(ctx, bootstrapClusterProxy, e2eConfig.MustGetVariable("K3S_BOOTSTRAP_COMPONENTS"))
+
 	// encode the e2e config into the byte array.
 	var configBuf bytes.Buffer
 	enc := gob.NewEncoder(&configBuf)
@@ -126,6 +134,7 @@ func createClusterctlLocalRepository(ctx context.Context, configPath string, art
 	// set default intervals
 	e2eConfig.Intervals = map[string][]string{}
 	e2eConfig.Intervals["default/wait-cluster"] = []string{"3m"}
+	e2eConfig.Intervals["default/wait-worker-nodes"] = []string{"10m", "10s"}
 
 	repositoryFolder := filepath.Join(artifactFolder, "repository")
 
@@ -208,6 +217,35 @@ func initBootstrapCluster(ctx context.Context, bootstrapClusterProxy framework.C
 	}, config.GetIntervals(bootstrapClusterProxy.GetName(), "wait-controllers")...)
 }
 
+// installK3sBootstrapProvider installs the k3s bootstrap provider (cluster-api-k3s) from its components URL.
+func installK3sBootstrapProvider(ctx context.Context, clusterProxy framework.ClusterProxy, componentsURL string) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, componentsURL, nil)
+	Expect(err).ToNot(HaveOccurred())
+
+	resp, err := http.DefaultClient.Do(req)
+	Expect(err).ToNot(HaveOccurred(), "Failed to download the k3s bootstrap provider components")
+
+	defer func() { _ = resp.Body.Close() }()
+
+	Expect(resp.StatusCode).To(Equal(http.StatusOK), "Failed to download the k3s bootstrap provider components")
+
+	components, err := io.ReadAll(resp.Body)
+	Expect(err).ToNot(HaveOccurred())
+
+	// the webhook certificate is issued by cert-manager, so retry until the webhooks are ready to serve
+	Eventually(func() error {
+		return clusterProxy.CreateOrUpdate(ctx, components)
+	}, "3m", "10s").Should(Succeed())
+
+	framework.WaitForDeploymentsAvailable(ctx, framework.WaitForDeploymentsAvailableInput{
+		Getter: clusterProxy.GetClient(),
+		Deployment: &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+			Name:      "capi-k3s-bootstrap-controller-manager",
+			Namespace: "capi-k3s-bootstrap-system",
+		}},
+	}, "3m", "10s")
+}
+
 func tearDown(ctx context.Context, bootstrapClusterProvider bootstrap.ClusterProvider, bootstrapClusterProxy framework.ClusterProxy) {
 	if bootstrapClusterProxy != nil {
 		bootstrapClusterProxy.Dispose(ctx)
@@ -279,3 +317,103 @@ var _ = When("creating a Cluster from the cluster-template", func() {
 		}, "5m", "10s").Should(Succeed())
 	})
 })
+
+var _ = When("creating an HCP Cluster with worker Machines", func() {
+	It("joins the worker nodes", func() {
+		specName := "cluster-hcp"
+
+		ctx := context.Background()
+		logFolder := filepath.Join(artifactFolder, "clusters", bootstrapClusterProxy.GetName())
+
+		By("Creating a namespace for the test")
+
+		namespace, cancelWatches := framework.CreateNamespaceAndWatchEvents(ctx, framework.CreateNamespaceAndWatchEventsInput{
+			Creator:   bootstrapClusterProxy.GetClient(),
+			ClientSet: bootstrapClusterProxy.GetClientSet(),
+			Name:      specName,
+			LogFolder: logFolder,
+		})
+
+		defer cancelWatches()
+		defer framework.DeleteNamespace(ctx, framework.DeleteNamespaceInput{
+			Deleter: bootstrapClusterProxy.GetClient(),
+			Name:    namespace.Name,
+		})
+
+		// the K3k server is exposed with a NodePort on the management cluster node, reachable by the CAPD Machines
+		endpointHost := managementClusterNodeIP(ctx)
+
+		input := clusterctl.ApplyClusterTemplateAndWaitInput{
+			ClusterProxy: bootstrapClusterProxy,
+			ConfigCluster: clusterctl.ConfigClusterInput{
+				Namespace:                namespace.Name,
+				ClusterName:              "hcp-" + utilrand.String(5),
+				ClusterctlConfigPath:     clusterctlConfigPath,
+				KubeconfigPath:           bootstrapClusterProxy.GetKubeconfigPath(),
+				InfrastructureProvider:   e2eConfig.GetVariableOrEmpty("INFRASTRUCTURE_PROVIDER"),
+				Flavor:                   "hcp-docker",
+				KubernetesVersion:        e2eConfig.GetVariableOrEmpty("KUBERNETES_VERSION"),
+				ControlPlaneMachineCount: ptr.To[int64](1),
+				WorkerMachineCount:       ptr.To[int64](1),
+				ClusterctlVariables:      map[string]string{"HCP_ENDPOINT_HOST": endpointHost},
+				LogFolder:                logFolder,
+			},
+			WaitForClusterIntervals:   e2eConfig.GetIntervals(specName, "wait-cluster"),
+			WaitForMachineDeployments: e2eConfig.GetIntervals(specName, "wait-worker-nodes"),
+			ControlPlaneWaiters: clusterctl.ControlPlaneWaiters{
+				WaitForControlPlaneInitialized:   noOpWaiter,
+				WaitForControlPlaneMachinesReady: noOpWaiter,
+			},
+		}
+
+		// waits for the MachineDeployment Machines to get a Node: they joined the K3k cluster with the
+		// token from the K3kControlPlane, and their providerID matches the Node one
+		var result clusterctl.ApplyClusterTemplateAndWaitResult
+		clusterctl.ApplyClusterTemplateAndWait(ctx, input, &result)
+
+		Expect(result.Cluster).ToNot(BeNil(), "The returned Cluster object should not be nil")
+		Expect(result.MachineDeployments).To(HaveLen(1))
+
+		By("Waiting for the worker nodes to be ready")
+
+		workloadClient := bootstrapClusterProxy.GetWorkloadCluster(ctx, namespace.Name, result.Cluster.Name).GetClient()
+
+		Eventually(func(g Gomega) {
+			nodes := &corev1.NodeList{}
+			g.Expect(workloadClient.List(ctx, nodes)).To(Succeed())
+			g.Expect(nodes.Items).To(HaveLen(1))
+
+			for _, node := range nodes.Items {
+				g.Expect(node.Spec.ProviderID).To(HavePrefix("docker://"))
+				g.Expect(isNodeReady(node)).To(BeTrue(), "node %s is not ready", node.Name)
+			}
+		}, "5m", "10s").Should(Succeed())
+	})
+})
+
+// managementClusterNodeIP returns the internal IP of the management cluster node.
+func managementClusterNodeIP(ctx context.Context) string {
+	nodes := &corev1.NodeList{}
+	Expect(bootstrapClusterProxy.GetClient().List(ctx, nodes)).To(Succeed())
+	Expect(nodes.Items).ToNot(BeEmpty())
+
+	for _, address := range nodes.Items[0].Status.Addresses {
+		if address.Type == corev1.NodeInternalIP {
+			return address.Address
+		}
+	}
+
+	Fail("management cluster node has no internal IP")
+
+	return ""
+}
+
+func isNodeReady(node corev1.Node) bool {
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == corev1.NodeReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+
+	return false
+}

@@ -9,6 +9,10 @@ images:
   loadBehavior: tryLoad
 - name: registry.k8s.io/cluster-api-helm/cluster-api-helm-controller:v0.3.2
   loadBehavior: tryLoad
+- name: gcr.io/k8s-staging-cluster-api/capd-manager:v1.14.3
+  loadBehavior: tryLoad
+- name: ghcr.io/k3s-io/cluster-api-k3s/bootstrap-controller:v0.4.0
+  loadBehavior: tryLoad
 
 providers:
 - name: cluster-api
@@ -50,6 +54,19 @@ providers:
     - old: "imagePullPolicy: Always"
       new: "imagePullPolicy: IfNotPresent"
 
+- name: docker
+  type: InfrastructureProvider
+  versions:
+  - name: v1.14.3
+    value: https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.14.3/infrastructure-components-development.yaml
+    type: url
+    contract: v1beta2
+    files:
+    - sourcePath: "data/shared/v1beta2/metadata.yaml"
+    replacements:
+    - old: "imagePullPolicy: Always"
+      new: "imagePullPolicy: IfNotPresent"
+
 - name: "k3k"
   type: "InfrastructureProvider"
   versions:
@@ -59,7 +76,13 @@ providers:
     files:
     - sourcePath: "../../metadata.yaml"
     - sourcePath: "../../templates/cluster-template.yaml"
+    - sourcePath: "data/infrastructure-k3k/cluster-template-hcp-docker.yaml"
 
 variables:
   INFRASTRUCTURE_PROVIDER: "k3k"
   KUBERNETES_VERSION: "v1.35.0"
+  KIND_IMAGE_VERSION: "v1.35.0"
+  HCP_ENDPOINT_PORT: "30443"
+  # The e2e framework only supports the kubeadm bootstrap provider in this file: the k3s bootstrap provider,
+  # used by the HCP worker Machines, is installed by the test suite from these components.
+  K3S_BOOTSTRAP_COMPONENTS: "https://github.com/k3s-io/cluster-api-k3s/releases/download/v0.4.0/bootstrap-components.yaml"
