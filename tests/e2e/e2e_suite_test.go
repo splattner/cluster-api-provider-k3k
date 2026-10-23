@@ -176,6 +176,7 @@ func setupBootstrapCluster(ctx context.Context, config *clusterctl.E2EConfig, us
 			Images:             config.Images,
 			// K3k sets a blockOwnerDeletion owner reference to its Cluster on the server PVC template,
 			// which the StatefulSet controller is not allowed to set when this admission plugin is enabled.
+			// See https://github.com/rancher/k3k/issues/1340
 			DisableOwnerReferencesPermissionEnforcement: true,
 		})
 		Expect(clusterProvider).NotTo(BeNil(), "Failed to create a bootstrap cluster")
