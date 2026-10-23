@@ -21,6 +21,15 @@ import (
 	clusterv1beta2 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 )
 
+const (
+	// K3kClusterReadyCondition is true when the K3kCluster is provisioned.
+	// K3kCluster has no infrastructure of its own to provision, so it is ready as soon as it is reconciled.
+	K3kClusterReadyCondition = clusterv1beta2.ReadyCondition
+
+	// K3kClusterReadyReason surfaces when the K3kCluster is provisioned.
+	K3kClusterReadyReason = clusterv1beta2.ReadyReason
+)
+
 // K3kClusterSpec defines the desired state of K3kCluster
 type K3kClusterSpec struct {
 	// ControlPlaneEndpoint is the endpoint that the server can be reached at. Should not be supplied at create
@@ -31,8 +40,38 @@ type K3kClusterSpec struct {
 
 // K3kClusterStatus defines the observed state of K3kCluster.
 type K3kClusterStatus struct {
+	// Conditions represents the observations of the K3kCluster's current state.
+	// Known condition types are Ready and Paused.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	// +kubebuilder:validation:MaxItems=32
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Initialization provides observations of the K3kCluster initialization process.
+	// NOTE: Fields in this struct are part of the Cluster API contract and are used to orchestrate initial Machine provisioning.
+	//
+	// +optional
+	Initialization *K3kClusterInitializationStatus `json:"initialization,omitempty"`
+
 	// Ready is true when the cluster is ready to be used.
-	Ready bool `json:"ready"`
+	//
+	// Kept for compatibility with the v1beta1 Cluster API contract, use initialization.provisioned instead.
+	//
+	// +optional
+	Ready bool `json:"ready,omitempty"`
+}
+
+// K3kClusterInitializationStatus provides observations of the K3kCluster initialization process.
+//
+// +kubebuilder:validation:MinProperties=1
+type K3kClusterInitializationStatus struct {
+	// Provisioned is true when the infrastructure provider reports that the cluster's infrastructure is fully provisioned.
+	// NOTE: This field is part of the Cluster API contract, and it is used to orchestrate initial Machine provisioning.
+	//
+	// +optional
+	Provisioned *bool `json:"provisioned,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -47,6 +86,16 @@ type K3kCluster struct {
 	Spec K3kClusterSpec `json:"spec,omitempty"`
 	// Status is the current status.
 	Status K3kClusterStatus `json:"status,omitempty"`
+}
+
+// GetConditions returns the set of conditions for this object.
+func (c *K3kCluster) GetConditions() []metav1.Condition {
+	return c.Status.Conditions
+}
+
+// SetConditions sets conditions for this object.
+func (c *K3kCluster) SetConditions(conditions []metav1.Condition) {
+	c.Status.Conditions = conditions
 }
 
 //+kubebuilder:object:root=true

@@ -72,11 +72,9 @@ rules:
   - cluster.x-k8s.io
   resources:
   - clusters
-  - clusters/status
   verbs:
   - get
   - list
-  - update
   - watch
 - apiGroups:
   - controlplane.cluster.x-k8s.io
@@ -127,12 +125,9 @@ rules:
   resources:
   - k3kclusters/status
   verbs:
-  - create
   - get
-  - list
   - patch
   - update
-  - watch
 - apiGroups:
   - k3k.io
   resources:

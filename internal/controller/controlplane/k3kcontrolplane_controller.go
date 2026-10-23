@@ -33,10 +33,18 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/cluster-api/util/conditions"
+	"sigs.k8s.io/cluster-api/util/patch"
+	"sigs.k8s.io/cluster-api/util/paused"
+	"sigs.k8s.io/cluster-api/util/predicates"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	upstream "github.com/rancher/k3k/pkg/apis/k3k.io/v1beta1"
+	k3kcontroller "github.com/rancher/k3k/pkg/controller"
 	v1 "k8s.io/api/core/v1"
 	apiError "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,7 +55,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	controlplanev1 "github.com/rancher/cluster-api-provider-k3k/api/controlplane/v1beta1"
-	infrastructurev1 "github.com/rancher/cluster-api-provider-k3k/api/infrastructure/v1beta1"
 	"github.com/rancher/cluster-api-provider-k3k/internal/helm"
 )
 
@@ -62,6 +69,8 @@ type scope struct {
 
 	k3kControlPlane *controlplanev1.K3kControlPlane
 	cluster         *clusterv1beta2.Cluster
+	// hostConfig is the config of the host cluster, nil for the management cluster
+	hostConfig *rest.Config
 }
 
 // K3kControlPlaneReconciler reconciles a K3kControlPlane object
@@ -101,15 +110,33 @@ func InitReconciler(ctx context.Context, mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&controlplanev1.K3kControlPlane{}).
+		Watches(
+			&clusterv1beta2.Cluster{},
+			handler.EnqueueRequestsFromMapFunc(clusterToK3kControlPlane),
+			builder.WithPredicates(predicates.ClusterPausedTransitions(mgr.GetScheme(), log)),
+		).
 		Complete(r)
+}
+
+// clusterToK3kControlPlane maps a CAPI Cluster to the K3kControlPlane it references.
+func clusterToK3kControlPlane(_ context.Context, o client.Object) []reconcile.Request {
+	cluster, ok := o.(*clusterv1beta2.Cluster)
+	if !ok {
+		return nil
+	}
+
+	ref := cluster.Spec.ControlPlaneRef
+	if ref.Kind != "K3kControlPlane" || ref.APIGroup != controlplanev1.GroupVersion.Group {
+		return nil
+	}
+
+	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: cluster.Namespace, Name: ref.Name}}}
 }
 
 //+kubebuilder:rbac:groups=controlplane.cluster.x-k8s.io,resources=k3kcontrolplanes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=controlplane.cluster.x-k8s.io,resources=k3kcontrolplanes/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=controlplane.cluster.x-k8s.io,resources=k3kcontrolplanes/finalizers,verbs=update
-//+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=k3kclusters,verbs=get;list;watch;create;update
-//+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=k3kclusters/status,verbs=get;list;watch;create;update
-//+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters;clusters/status,verbs=get;list;watch;update
+//+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch
 //+kubebuilder:rbac:groups=k3k.io,resources=clusters,verbs=get;list;watch;create;update;delete
 //+kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=clusterroles,verbs=bind;get;create
 //+kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=clusterrolebindings,verbs=get;create
@@ -123,7 +150,7 @@ func InitReconciler(ctx context.Context, mgr ctrl.Manager) error {
 //+kubebuilder:rbac:groups=scheduling.k8s.io,resources=priorityclasses,verbs=*
 
 // Reconcile creates a K3k Upstream cluster based on the provided spec of the K3kControlPlane.
-func (r *K3kControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *K3kControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
 	log := ctrl.LoggerFrom(ctx)
 
 	var k3kControlPlane controlplanev1.K3kControlPlane
@@ -169,10 +196,6 @@ func (r *K3kControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		r.Host = hostClient
 	}
 
-	if _, err := r.ensureK3kController(ctx, hostConfig); err != nil {
-		return ctrl.Result{}, fmt.Errorf("error installing K3k controller: %w", err)
-	}
-
 	cluster, err := capiutil.GetOwnerCluster(ctx, r, k3kControlPlane.ObjectMeta)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("unable to get capi cluster owner: %w", err)
@@ -185,10 +208,30 @@ func (r *K3kControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
+	if isPaused, requeue, err := paused.EnsurePausedCondition(ctx, r.Client, cluster, &k3kControlPlane); err != nil || isPaused || requeue {
+		return ctrl.Result{}, err
+	}
+
+	patchHelper, err := patch.NewHelper(&k3kControlPlane, r.Client)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	defer func() {
+		if err := patchHelper.Patch(ctx, &k3kControlPlane, patch.WithOwnedConditions{Conditions: []string{
+			clusterv1beta2.PausedCondition,
+			controlplanev1.K3kControlPlaneAvailableCondition,
+			controlplanev1.K3kControllerUpToDateCondition,
+		}}); err != nil {
+			reterr = errors.Join(reterr, err)
+		}
+	}()
+
 	scope := &scope{
 		Logger:          log,
 		k3kControlPlane: &k3kControlPlane,
 		cluster:         cluster,
+		hostConfig:      hostConfig,
 	}
 
 	if !k3kControlPlane.DeletionTimestamp.IsZero() {
@@ -199,6 +242,18 @@ func (r *K3kControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 }
 
 func (r *K3kControlPlaneReconciler) reconcileNormal(ctx context.Context, scope *scope) (ctrl.Result, error) {
+	// add the finalizer before creating the upstream cluster, so it can't be left behind
+	if controllerutil.AddFinalizer(scope.k3kControlPlane, finalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	plan, err := r.ensureK3kController(ctx, scope.hostConfig)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("error installing K3k controller: %w", err)
+	}
+
+	setK3kControllerUpToDateCondition(scope.k3kControlPlane, plan)
+
 	upstreamCluster, err := r.reconcileUpstreamCluster(ctx, scope.k3kControlPlane)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("unable to reconcile k3k cluster: %w", err)
@@ -208,6 +263,10 @@ func (r *K3kControlPlaneReconciler) reconcileNormal(ctx context.Context, scope *
 	}
 
 	scope.Info("Reconciled upstream cluster for controlPlane", "upstreamCluster", upstreamCluster, "controlPlane", scope.k3kControlPlane.Name)
+
+	scope.k3kControlPlane.Status.ExternalManagedControlPlane = true
+	scope.k3kControlPlane.Status.ClusterStatus = *upstreamCluster.Status.DeepCopy()
+	setAvailableCondition(scope.k3kControlPlane, upstreamCluster)
 
 	config, err := r.getKubeconfig(ctx, upstreamCluster)
 	if err != nil {
@@ -232,28 +291,22 @@ func (r *K3kControlPlaneReconciler) reconcileNormal(ctx context.Context, scope *
 		return ctrl.Result{}, fmt.Errorf("unable to resolve server url")
 	}
 
-	err = r.updateCluster(ctx, serverURL, scope.cluster)
+	endpoint, err := apiEndpointFromURL(serverURL)
 	if err != nil {
-		scope.Error(err, "Unable to update capiCluster")
-		return ctrl.Result{}, fmt.Errorf("unable to update capi cluster")
+		scope.Error(err, "Unable to get the control plane endpoint from serverURL")
+		return ctrl.Result{}, fmt.Errorf("unable to resolve control plane endpoint: %w", err)
 	}
 
-	// Update status if not ready
-	statusUpdated := !scope.k3kControlPlane.Status.Ready || !scope.k3kControlPlane.Status.Initialized
-	if statusUpdated {
-		scope.k3kControlPlane.Status.Ready = true
-		scope.k3kControlPlane.Status.Initialized = true
-		scope.k3kControlPlane.Status.ExternalManagedControlPlane = true
-		scope.k3kControlPlane.Status.ClusterStatus = *upstreamCluster.Status.DeepCopy()
+	// CAPI copies the endpoint to the Cluster and orchestrates Machine provisioning from these fields.
+	scope.k3kControlPlane.Spec.ControlPlaneEndpoint = endpoint
+	scope.k3kControlPlane.Status.Initialization = &controlplanev1.K3kControlPlaneInitializationStatus{ControlPlaneInitialized: ptr.To(true)}
+	scope.k3kControlPlane.Status.Version = k3kcontroller.K3SVersion(upstreamCluster)
+	scope.k3kControlPlane.Status.Initialized = true
+	scope.k3kControlPlane.Status.Ready = true
 
-		if err := r.Status().Update(ctx, scope.k3kControlPlane); err != nil {
-			scope.Error(err, "unable to update status on controlPlane")
-			return ctrl.Result{}, fmt.Errorf("unable to update status")
-		}
-	}
-
-	if controllerutil.AddFinalizer(scope.k3kControlPlane, finalizer) {
-		return ctrl.Result{Requeue: true}, r.Update(ctx, scope.k3kControlPlane)
+	// requeue until the upstream cluster is ready, to keep the status up to date
+	if upstreamCluster.Status.Phase != upstream.ClusterReady {
+		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -265,7 +318,30 @@ func (r *K3kControlPlaneReconciler) reconcileDelete(ctx context.Context, scope *
 		scope.Error(err, "Couldn't remove upstream cluster")
 		return ctrl.Result{}, err
 	}
+
+	controllerutil.RemoveFinalizer(scope.k3kControlPlane, finalizer)
+
 	return ctrl.Result{}, nil
+}
+
+// setAvailableCondition mirrors the readiness of the upstream K3k cluster to the Available condition.
+func setAvailableCondition(controlPlane *controlplanev1.K3kControlPlane, upstreamCluster *upstream.Cluster) {
+	if upstreamCluster.Status.Phase == upstream.ClusterReady {
+		conditions.Set(controlPlane, metav1.Condition{
+			Type:   controlplanev1.K3kControlPlaneAvailableCondition,
+			Status: metav1.ConditionTrue,
+			Reason: controlplanev1.K3kControlPlaneAvailableReason,
+		})
+
+		return
+	}
+
+	conditions.Set(controlPlane, metav1.Condition{
+		Type:    controlplanev1.K3kControlPlaneAvailableCondition,
+		Status:  metav1.ConditionFalse,
+		Reason:  controlplanev1.K3kControlPlaneProvisioningReason,
+		Message: fmt.Sprintf("K3k cluster %s/%s is in phase %q", upstreamCluster.Namespace, upstreamCluster.Name, upstreamCluster.Status.Phase),
+	})
 }
 
 // reconcileUpstreamCluster creates/updates the k3k cluster that the k3k controllers will recognize.
@@ -341,7 +417,7 @@ func (r *K3kControlPlaneReconciler) reconcileUpstreamCluster(ctx context.Context
 	return currentCluster, nil
 }
 
-// deleteUpstreamClusters deletes all upstream clusters associated with this controlPlane and removes the finalizer on the controlPlane.
+// deleteUpstreamClusters deletes all upstream clusters associated with this controlPlane.
 func (r *K3kControlPlaneReconciler) deleteUpstreamClusters(ctx context.Context, controlPlane *controlplanev1.K3kControlPlane) error {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -358,11 +434,6 @@ func (r *K3kControlPlaneReconciler) deleteUpstreamClusters(ctx context.Context, 
 	}
 	if err := errors.Join(deleteErrs...); err != nil {
 		return fmt.Errorf("failed to delete some upstream clusters: %w", err)
-	}
-	controllerutil.RemoveFinalizer(controlPlane, finalizer)
-	err = r.Update(ctx, controlPlane)
-	if err != nil {
-		return fmt.Errorf("unable to update k3k controlplane finalizer after removing clusters: %w", err)
 	}
 	return nil
 }
@@ -430,61 +501,21 @@ func (r *K3kControlPlaneReconciler) createKubeconfigSecret(ctx context.Context, 
 	return nil
 }
 
-func (r *K3kControlPlaneReconciler) updateCluster(ctx context.Context, serverURL *url.URL, capiCluster *clusterv1beta2.Cluster) error {
-	clusterRef := capiCluster.Spec.InfrastructureRef
-	if clusterRef.Kind != "K3kCluster" {
-		return fmt.Errorf("unable to update cluster, infrastructure is not for a k3k cluster %v", clusterRef)
-	}
-	k3kObjectKey := client.ObjectKey{
-		Name:      clusterRef.Name,
-		Namespace: capiCluster.Namespace,
-	}
+// apiEndpointFromURL returns the control plane endpoint for the server URL, defaulting to the HTTPS port.
+func apiEndpointFromURL(serverURL *url.URL) (clusterv1beta2.APIEndpoint, error) {
+	port := int64(443)
 
-	var k3kCluster infrastructurev1.K3kCluster
-	if err := r.Get(ctx, k3kObjectKey, &k3kCluster); err != nil {
-		return fmt.Errorf("unable to get k3k cluster %s/%s: %w", k3kObjectKey.Namespace, k3kObjectKey.Name, err)
-	}
-
-	k3kCluster = *k3kCluster.DeepCopy()
-	host := serverURL.Hostname()
-	k3kCluster.Spec.ControlPlaneEndpoint.Host = host
-	port := serverURL.Port()
-	if port != "" {
-		intPort, err := strconv.ParseInt(port, 10, 32)
-		if err != nil {
-			return fmt.Errorf("unable to cast port %s from string to int: %w", port, err)
+	if p := serverURL.Port(); p != "" {
+		var err error
+		if port, err = strconv.ParseInt(p, 10, 32); err != nil {
+			return clusterv1beta2.APIEndpoint{}, fmt.Errorf("unable to cast port %s from string to int: %w", p, err)
 		}
-		k3kCluster.Spec.ControlPlaneEndpoint.Port = int32(intPort)
 	}
 
-	if err := r.Update(ctx, &k3kCluster); err != nil {
-		return fmt.Errorf("unable to update k3kCluster %s with host and port: %w", k3kCluster.Name, err)
-	}
-
-	k3kCluster.Status = infrastructurev1.K3kClusterStatus{}
-	k3kCluster.Status.Ready = true
-
-	if err := r.Status().Update(ctx, &k3kCluster); err != nil {
-		return fmt.Errorf("unable to update k3kCluster %s status: %w", k3kCluster.Name, err)
-	}
-
-	// Update the CAPI Cluster's control plane endpoint
-	capiCluster = capiCluster.DeepCopy()
-	capiCluster.Spec.ControlPlaneEndpoint.Host = host
-	capiCluster.Spec.ControlPlaneEndpoint.Port = k3kCluster.Spec.ControlPlaneEndpoint.Port
-
-	if err := r.Update(ctx, capiCluster); err != nil {
-		return fmt.Errorf("unable to update CAPI cluster %s with control plane endpoint: %w", capiCluster.Name, err)
-	}
-
-	capiCluster.Status.Initialization.ControlPlaneInitialized = ptr.To(true)
-	capiCluster.Status.Initialization.InfrastructureProvisioned = ptr.To(true)
-
-	if err := r.Status().Update(ctx, capiCluster); err != nil {
-		return fmt.Errorf("unable to update CAPI cluster %s with control plane endpoint: %w", capiCluster.Name, err)
-	}
-
-	return nil
+	return clusterv1beta2.APIEndpoint{
+		Host: serverURL.Hostname(),
+		Port: int32(port),
+	}, nil
 }
 
 func serverURLFromKubeConfig(config *clientcmdapi.Config) (*url.URL, error) {

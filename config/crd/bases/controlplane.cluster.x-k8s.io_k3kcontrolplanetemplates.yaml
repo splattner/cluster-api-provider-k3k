@@ -1228,6 +1228,26 @@ spec:
                         x-kubernetes-validations:
                         - message: clusterDNS is immutable
                           rule: self == oldSelf
+                      controlPlaneEndpoint:
+                        description: |-
+                          ControlPlaneEndpoint represents the endpoint used to communicate with the control plane.
+                          Should not be supplied at create time by the end user, the controller will fill this in when provisioning is complete.
+                        minProperties: 1
+                        properties:
+                          host:
+                            description: host is the hostname on which the API server
+                              is serving.
+                            maxLength: 512
+                            minLength: 1
+                            type: string
+                          port:
+                            description: port is the port on which the API server
+                              is serving.
+                            format: int32
+                            maximum: 65535
+                            minimum: 1
+                            type: integer
+                        type: object
                       customCAs:
                         description: CustomCAs specifies the cert/key pairs for custom
                           CA certificates.
