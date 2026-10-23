@@ -6,13 +6,24 @@ A Cluster API provider for [K3k](https://github.com/rancher/k3k).
 
 This project allows the provisioning and management of K3k clusters using [CAPI](https://cluster-api.sigs.k8s.io).
 
+## Usage
+
+A `K3kControlPlane` creates a K3k cluster on a host cluster (the management cluster, or the cluster referenced by
+`spec.hostKubeconfig`). Its spec embeds the K3k [ClusterSpec](https://github.com/rancher/k3k/blob/main/docs/crds/crds.md),
+and the `mode` selects how the K3k cluster runs:
+
+- `shared` (default) and `virtual`: the nodes are managed by K3k on the host cluster, use a `K3kCluster` as
+  infrastructure. See [templates/cluster-template.yaml](templates/cluster-template.yaml).
+- `hcp`: K3k runs only the control plane, the worker nodes are Cluster API Machines of any infrastructure provider,
+  joined with the k3s bootstrap provider. See [Hosted Control Plane (HCP) mode](docs/hcp-mode.md).
+
 ## Getting Started
 
 ### Prerequisites
 
 The following specify the minimum version requirement of each component:
 
-- Go v1.22
+- Go v1.26
 - Docker v24
 - Access to a Kubernetes cluster v1.25
 - Tilt v0.33.11
@@ -93,6 +104,9 @@ project other than the dev setup documented above.
 ## Contributing
 
 All changes should have an issue attached to them, and should have tests (where appropriate).
+
+Don't use `''` (empty string) in `+kubebuilder:validation:XValidation` rules: the Go doc comment formatting of
+`make lint-fix` turns it into `”`, which makes the CRD invalid. Use e.g. `size(self.field) > 0` instead.
 
 ## License
 

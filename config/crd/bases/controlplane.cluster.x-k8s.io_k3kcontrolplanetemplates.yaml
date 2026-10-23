@@ -3468,6 +3468,15 @@ spec:
                             type: object
                         type: object
                     type: object
+                    x-kubernetes-validations:
+                    - message: version is required in hcp mode
+                      rule: '!has(self.mode) || self.mode != ''hcp'' || (has(self.version)
+                        && size(self.version) > 0)'
+                    - message: expose must be set to nodePort, loadBalancer or ingress
+                        in hcp mode
+                      rule: '!has(self.mode) || self.mode != ''hcp'' || (has(self.expose)
+                        && (has(self.expose.nodePort) || has(self.expose.loadBalancer)
+                        || has(self.expose.ingress)))'
                 required:
                 - spec
                 type: object
