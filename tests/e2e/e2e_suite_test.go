@@ -19,8 +19,11 @@ import (
 	"sigs.k8s.io/cluster-api/test/framework"
 	"sigs.k8s.io/cluster-api/test/framework/bootstrap"
 	"sigs.k8s.io/cluster-api/test/framework/clusterctl"
+	"sigs.k8s.io/cluster-api/util/conditions"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
+	clusterv1beta2 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -264,5 +267,15 @@ var _ = When("creating a Cluster from the cluster-template", func() {
 		clusterctl.ApplyClusterTemplateAndWait(ctx, input, &result)
 
 		Expect(result.Cluster).ToNot(BeNil(), "The returned Cluster object should not be nil")
+
+		By("Waiting for the control plane to be initialized and available")
+
+		Eventually(func(g Gomega) {
+			cluster := &clusterv1beta2.Cluster{}
+			g.Expect(bootstrapClusterProxy.GetClient().Get(ctx, client.ObjectKeyFromObject(result.Cluster), cluster)).To(Succeed())
+			g.Expect(ptr.Deref(cluster.Status.Initialization.ControlPlaneInitialized, false)).To(BeTrue())
+			g.Expect(conditions.IsTrue(cluster, clusterv1beta2.ClusterInfrastructureReadyCondition)).To(BeTrue())
+			g.Expect(conditions.IsTrue(cluster, clusterv1beta2.ClusterControlPlaneAvailableCondition)).To(BeTrue())
+		}, "5m", "10s").Should(Succeed())
 	})
 })

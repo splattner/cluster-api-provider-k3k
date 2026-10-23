@@ -1162,6 +1162,24 @@ spec:
                 x-kubernetes-validations:
                 - message: clusterDNS is immutable
                   rule: self == oldSelf
+              controlPlaneEndpoint:
+                description: |-
+                  ControlPlaneEndpoint represents the endpoint used to communicate with the control plane.
+                  Should not be supplied at create time by the end user, the controller will fill this in when provisioning is complete.
+                minProperties: 1
+                properties:
+                  host:
+                    description: host is the hostname on which the API server is serving.
+                    maxLength: 512
+                    minLength: 1
+                    type: string
+                  port:
+                    description: port is the port on which the API server is serving.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                type: object
               customCAs:
                 description: CustomCAs specifies the cert/key pairs for custom CA
                   certificates.
@@ -5924,25 +5942,104 @@ spec:
                       type: string
                     type: array
                 type: object
+              conditions:
+                description: |-
+                  Conditions represents the observations of the K3kControlPlane's current state.
+                  Known condition types are Available and Paused.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                maxItems: 32
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               externalManagedControlPlane:
                 description: |-
                   ExternalManagedControlPlane conforms to the upstream CAPI interface - true if node objects do not exist in the controlplane.
                   While K3k does have specific pods for the controlplane, these don't correspond to specific CAPI objects/machines, so in the
                   current state this will always be true.
                 type: boolean
+              initialization:
+                description: |-
+                  Initialization provides observations of the K3kControlPlane initialization process.
+                  NOTE: Fields in this struct are part of the Cluster API contract and are used to orchestrate initial Machine provisioning.
+                minProperties: 1
+                properties:
+                  controlPlaneInitialized:
+                    description: |-
+                      ControlPlaneInitialized is true when the K3k cluster can accept requests.
+                      NOTE: This field is part of the Cluster API contract, and it is used to orchestrate initial Machine provisioning.
+                    type: boolean
+                type: object
               initialized:
-                description: Initialized conforms to the upstream CAPI interface -
-                  true when the controlplane is contactable.
+                description: |-
+                  Initialized is true when the controlplane is contactable.
+
+                  Kept for compatibility with the v1beta1 Cluster API contract, use initialization.controlPlaneInitialized instead.
                 type: boolean
               ready:
-                description: Ready conforms to the upstream CAPI interface - true
-                  when the target API Server is ready to receive requests.
+                description: |-
+                  Ready is true when the target API Server is ready to receive requests.
+
+                  Kept for compatibility with the v1beta1 Cluster API contract, use the Available condition instead.
                 type: boolean
-            required:
-            - clusterStatus
-            - externalManagedControlPlane
-            - initialized
-            - ready
+              version:
+                description: |-
+                  Version represents the Kubernetes version of the K3k cluster.
+                  NOTE: This field is part of the Cluster API contract, it is used to determine if the control plane is still provisioning.
+                type: string
             type: object
         type: object
     served: true
