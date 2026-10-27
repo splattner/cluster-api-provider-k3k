@@ -49,5 +49,17 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
+      # Docker Machines run nested containers (systemd, containerd), which fail to start with the default limits.
+      - name: Increase inotify limits
+        run: sudo sysctl -w fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288
+
       - name: Tests
         run: make test-e2e
+
+      - name: Upload e2e artifacts
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-artifacts
+          path: tests/e2e/_artifacts
+          retention-days: 7

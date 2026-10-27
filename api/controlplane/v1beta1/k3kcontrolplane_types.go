@@ -32,6 +32,10 @@ const (
 	// K3kControlPlaneAvailableReason surfaces when the backing K3k cluster is ready.
 	K3kControlPlaneAvailableReason = clusterv1beta2.AvailableReason
 
+	// K3kControlPlaneEndpointMismatchReason surfaces when the backing K3k cluster is not exposed
+	// at the control plane endpoint of the Cluster.
+	K3kControlPlaneEndpointMismatchReason = "EndpointMismatch"
+
 	// K3kControllerUpToDateCondition is true when the K3k controller on the host cluster has at least the
 	// version required by the provider.
 	K3kControllerUpToDateCondition = "K3kControllerUpToDate"
@@ -52,6 +56,9 @@ const (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // K3kControlPlaneSpec defines the desired state of K3kControlPlane
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'hcp' || (has(self.version) && size(self.version) > 0)",message="version is required in hcp mode"
+// +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'hcp' || (has(self.expose) && (has(self.expose.nodePort) || has(self.expose.loadBalancer) || has(self.expose.ingress)))",message="expose must be set to nodePort, loadBalancer or ingress in hcp mode"
 type K3kControlPlaneSpec struct {
 	// HostKubeconfig specifies the location of the Kubernetes secret containing the kubeconfig for the host cluster where the K3k cluster will be installed.
 	// If not provided, the K3k cluster will be created in the current context's cluster.
