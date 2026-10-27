@@ -140,19 +140,43 @@ Cluster control plane endpoint.
 ### Node providerIDs
 
 Cluster API matches Machines to Nodes with `spec.providerID`. The K3s embedded cloud controller manager sets
-`k3s://<node>` providerIDs, which don't match any infrastructure provider, so it is disabled by default. The
-`KThreesConfig` agents run the kubelet with `--cloud-provider=external` by default, so the providerID must be set by
-either:
+`k3s://<node>` providerIDs, which don't match any infrastructure provider, so it is disabled by default.
 
-- the cloud controller manager of the infrastructure (e.g. the vSphere CPI or the OpenStack CCM), deployed in the
+By default, `KThreesConfig` runs the kubelet with `--cloud-provider=external` (`serverConfig.cloudProviderName`
+defaults to `external`, also for agents). The kubelet then registers the node with the
+`node.cloudprovider.kubernetes.io/uninitialized` taint, which only a cloud controller manager removes. The k3s agent
+waits for the taint to be removed before it reports ready: until then, `systemctl start k3s-agent` doesn't return,
+the bootstrap (cloud-init) doesn't finish, and infrastructure providers that check the bootstrap result (e.g.
+[CAPK](https://github.com/kubernetes-sigs/cluster-api-provider-kubevirt)) never mark the Machine as bootstrapped.
+
+Pick one of these setups:
+
+- **The cloud controller manager of the infrastructure** (e.g. the vSphere CPI or the OpenStack CCM), deployed in the
   K3k cluster, for example with a [ClusterResourceSet](https://cluster-api.sigs.k8s.io/tasks/cluster-resource-set) or
-  the [Cluster API Add-on Provider for Helm](https://github.com/kubernetes-sigs/cluster-api-addon-provider-helm),
-- the kubelet `provider-id` argument in the `KThreesConfigTemplate` (`agentConfig.kubeletArgs`), if the infrastructure
-  can render it,
-- the infrastructure provider itself (CAPD does).
+  the [Cluster API Add-on Provider for Helm](https://github.com/kubernetes-sigs/cluster-api-addon-provider-helm). Keep
+  the default `cloudProviderName`: the cloud controller manager sets the providerID and removes the taint.
+- **No cloud controller manager**: disable the external cloud provider with an empty `cloudProviderName`, and let the
+  kubelet set the providerID with its `provider-id` argument, if the infrastructure provider can render it. For
+  example with KubeVirt workers ([CAPK](https://github.com/kubernetes-sigs/cluster-api-provider-kubevirt)), where the
+  VM name is the hostname from the cloud-init metadata (`KThreesConfig` renders cloud-init as Jinja):
 
-Until then, the nodes keep the `node.cloudprovider.kubernetes.io/uninitialized` taint, and the Machines stay
-`Provisioning`.
+  ```yaml
+  apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+  kind: KThreesConfigTemplate
+  spec:
+    template:
+      spec:
+        serverConfig:
+          cloudProviderName: ""
+        agentConfig:
+          kubeletArgs:
+            - provider-id=kubevirt://{{ ds.meta_data.local_hostname }}
+  ```
+
+- **The infrastructure provider sets the providerID and removes the taint itself.** CAPD does, so the
+  [`hcp-docker`](#example-docker-workers) template keeps the defaults.
+
+Otherwise the nodes join but keep the taint, no Pods are scheduled on them, and the Machines stay `Provisioning`.
 
 ## Example: Docker workers
 
@@ -190,6 +214,7 @@ sudo sysctl -w fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524
 | K3kControlPlane `Available` is `False` with reason `EndpointMismatch` | K3k is exposed at a different address than the Cluster control plane endpoint, e.g. a different `expose.nodePort.serverPort`. The message shows both addresses. |
 | Machines wait for the bootstrap data | The `<cluster>-token` Secret is missing: check the K3kControlPlane events and the K3k token Secret in the host namespace. |
 | Machines stay `Provisioning`, Nodes exist without providerID | No cloud controller manager sets the Node providerIDs, see [Node providerIDs](#node-providerids). |
+| Machines stay `Provisioning`, Nodes are tainted `node.cloudprovider.kubernetes.io/uninitialized`, the k3s agent logs `waiting for removal of node.cloudprovider.kubernetes.io/uninitialized taint` | The kubelet runs with `--cloud-provider=external` and no cloud controller manager removes the taint, so the agent and the bootstrap never finish. Deploy one, or set `serverConfig.cloudProviderName: ""`, see [Node providerIDs](#node-providerids). |
 | Nodes join, but Pods can't reach the API server | The control plane endpoint is not reachable from the Pods on the worker nodes, or it is not the first TLS SAN. |
 
 ## Limitations
